@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "required": [
+    "realm_access"
+  ],
+  "properties": {
+    "realm_access": {
+      "type": "object",
+      "required": [
+        "roles"
+      ],
+      "properties": {
+        "roles": {
+          "type": "array",
+          "contains": {
+            "type": "string",
+            "enum": [
+              "offline_access"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

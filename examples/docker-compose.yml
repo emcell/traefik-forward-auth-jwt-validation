@@ -1,0 +1,173 @@
+version: '3'
+
+volumes:
+  postgres_data:
+    driver: local
+services:
+  # needed for the keycloak server
+  postgres:
+    image: postgres
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+  # After first startup navigate to http://login.localhost.emcellsoft.de
+  # 1. Click on Administration and login with "admin", "admin"
+  # 2. Navigate to "clients" -> "Create"
+  # 3. fill the form (client ID = test, client protocol = openid-connect, root URL = ) -> save
+  # 4. set access-type to "confidential", add "valid redirect url" = "*" -> save
+  # 5. navigate to credentials and save the secret
+  # 6. Navigate to users -> view all users ->  edit on admin user
+  # 7. fill E-Mail Address and set Email-Verified to On
+  keycloak:
+    image: jboss/keycloak:latest
+    environment:
+      DB_VENDOR: POSTGRES
+      DB_ADDR: postgres
+      DB_DATABASE: keycloak
+      DB_USER: keycloak
+      DB_SCHEMA: public
+      DB_PASSWORD: keycloak
+      # username for keycloak
+      KEYCLOAK_USER: admin
+      # password for keycloak
+      KEYCLOAK_PASSWORD: admin
+      PROXY_ADDRESS_FORWARDING: "true"
+    depends_on:
+      - postgres
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.keycloak.rule=Host(`login.localhost.emcellsoft.de`)
+  traefik:
+    image: "traefik:v2.3"
+    container_name: "traefik"
+    command:
+      # dashboard available with port 80
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      # http entrypoint
+      - "80:80"
+      # dashboard http://localhost:8080
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      default:
+        aliases:
+          # the oauth2_proxy communicates inside the cluster with the keycloak application
+          # for the reason the alias for login.localhost.emcellsoft.de is necessary as it usually resolves to 127.0.0.1
+          # Usually the traffic to login.localhost.emcellsoft.de also goes through
+          # the traffic. Just wanted to keep things as near as possible to production
+          - login.localhost.emcellsoft.de
+
+  oauth:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v6.1.1
+    labels:
+      ai.ix.expose: 'true'
+      traefik.enable: 'true'
+      # middleware to check if the user is authenticated. Traffic will be forwarded to the oauth2_proxy
+      traefik.http.middlewares.oauth-verify.forwardAuth.address: http://oauth:4180/oauth2/auth
+      traefik.http.middlewares.oauth-verify.forwardAuth.trustForwardHeader: 'true'
+      # need to specify the response headers from oauth2_proxy that should be forwarded to the app
+      traefik.http.middlewares.oauth-verify.forwardAuth.authResponseHeaders: X-Auth-Request-User, X-Auth-Request-Email, Set-Cookie, X-Auth-Request-Access-Token, X-Forwarded-Access-Token
+      traefik.http.routers.oauth.rule: Host(`auth.localhost.emcellsoft.de`)
+      traefik.http.routers.oauth.service: oauth@docker
+      traefik.http.services.oauth.loadbalancer.server.port: '4180'
+    environment:
+      # in the example i'm using a client named 'test'
+      OAUTH2_PROXY_CLIENT_ID: 'test'
+      # you have to set this to get everything working. this secret is automatically generated when you create the client
+      # you can find it in http://login.localhost.emcellsoft.de/ -> administration ->
+      # login with "admin", "admin"
+      # naviagte to clients -> test -> credentials
+      # copy secret
+      OAUTH2_PROXY_CLIENT_SECRET: '<the_secret_copied_from_keycloak>'
+      # Set the oauth cookie to this domain. All applications have to be placed behind this subdomain
+      OAUTH2_PROXY_COOKIE_DOMAINS: '.localhost.emcellsoft.de'
+      # set cookie secure to false since everything is working on localhost without tls enabled
+      # otherwise cookies won't be accepted from browsers because oauth2_proxy would set them with secure flag
+      OAUTH2_PROXY_COOKIE_SECURE: 'false'
+      OAUTH2_PROXY_COOKIE_SECRET: '01234567890123456789012345678901'
+      # change settings depending on your oauth2 provider
+      OAUTH2_PROXY_PROVIDER: 'keycloak'
+      OAUTH2_PROXY_LOGIN_URL: http://login.localhost.emcellsoft.de/auth/realms/master/protocol/openid-connect/auth
+      OAUTH2_PROXY_REDEEM_URL: http://login.localhost.emcellsoft.de/auth/realms/master/protocol/openid-connect/token
+      OAUTH2_PROXY_VALIDATE_URL: http://login.localhost.emcellsoft.de/auth/realms/master/protocol/openid-connect/userinfo
+      # change this if you want to have only users to have access with some specific domails in their emails
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      # this scope will be fetched from keycloak. you could change that if you want
+      OAUTH2_PROXY_SCOPE: 'email'
+      # don't listen on localhost only.
+      OAUTH2_PROXY_HTTP_ADDRESS: '0.0.0.0:4180'
+      OAUTH2_PROXY_PASS_BASIC_AUTH: 'false'
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+      OAUTH2_PROXY_PASS_ACCESS_TOKEN: "true"
+      # should be enabled when oauth2_proxy is running behind a reverse proxy. Otherwise the real-ip and hostname
+      # won't be correctly determined from oauth2_proxy
+      OAUTH2_PROXY_REVERSE_PROXY: 'true'
+      OAUTH2_PROXY_SET_AUTHORIZATION_HEADER: "true"
+      # set X-Auth-Request-User, X-Auth-Request-Email and X-Auth-Request-Preferred-Username response headers
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      # need to whitelist our cookie domain for redirection since we're starting oauth2 process from a domain different
+      # to our application domain (auth.localhost.emcellsoft.de)
+      OAUTH2_PROXY_WHITELIST_DOMAINS: '.localhost.emcellsoft.de'
+    depends_on:
+      # first start keycloak, then oauth2_proxy
+      - keycloak
+  traefik-forward-auth-jwt-validation:
+    image: traefik-forward-auth-jwt-validation:latest
+    labels:
+      traefik.enable: 'true'
+      # create the service an set the port
+      traefik.http.routers.traefik-forward-auth-jwt-validation.service: traefik-forward-auth-jwt-validation@docker
+      traefik.http.services.traefik-forward-auth-jwt-validation.loadbalancer.server.port: '3000'
+
+      # configuration is completely in the address of this middleware
+      # example json schema in examples/json-schema.json
+      # roles from realm_access in the jwt token will be copied to X-Roles here
+      # -> X-Roles|$.realm_access.roles[*]
+      #
+      # you can create as much middlewares as you want. Just make sure that the name of the middleware stays
+      # unique (change jwt-validate to something different).
+      traefik.http.middlewares.jwt-validate.forwardAuth.address: http://traefik-forward-auth-jwt-validation:3000/validate/jwt?extractAsHeader=X-Roles%7C%24.realm_access.roles%5B%2A%5D&jsonSchema=%7B%22type%22%3A%22object%22%2C%22required%22%3A%5B%22realm_access%22%5D%2C%22properties%22%3A%7B%22realm_access%22%3A%7B%22type%22%3A%22object%22%2C%22required%22%3A%5B%22roles%22%5D%2C%22properties%22%3A%7B%22roles%22%3A%7B%22type%22%3A%22array%22%2C%22contains%22%3A%7B%22type%22%3A%22string%22%2C%22enum%22%3A%5B%22offline_access%22%5D%7D%7D%7D%7D%7D%7D
+      traefik.http.middlewares.jwt-validate.forwardAuth.trustForwardHeader: 'true'
+      # forward the newly generated http header to the application
+      traefik.http.middlewares.jwt-validate.forwardAuth.authResponseHeaders: X-Roles
+
+      # on every http-status code 401 the content of the
+      # /redirect page of traefik-forward-auth-jwt-validation will be served
+      # This page tries to redirect you with javascript to the given "to" url.
+      # For users with javascript disabled there will be also a link visible
+      #
+      # This is used to skip the "Login with keycloak" button from the /oauth/sign_in page of oauth2_proxy.
+      # I know that oauth2_proxy already has the setting "--skip-provider-button". But this isn't working
+      # correct together with traefik in this case. The "Location" header will be set correctly but traefik is returning
+      # status code 401 instead 30X. So the browser will ignore the Location header and does nothing.
+      # The solution with javascript is not perfect but better than a "Sign in with keycloak" button that doesn't
+      # match my sites design
+      traefik.http.middlewares.oauth-signin.errors.service: traefik-forward-auth-jwt-validation@docker
+      traefik.http.middlewares.oauth-signin.errors.status: '401'
+      traefik.http.middlewares.oauth-signin.errors.query: /redirect?to=http%3A%2F%2Fauth.localhost.emcellsoft.de%2Foauth2%2Fstart%3Frd%3D%24%7BredirectTo%7D
+  # This is the example application we're trying to secure here
+  whoami:
+    # using the whoami application to see clearly what http headers are sent to the application
+    image: containous/whoami:latest
+    labels:
+      traefik.enable: true
+      traefik.http.routers.whoami.rule: Host(`whoami.localhost.emcellsoft.de`)
+      # enable all middlewares.
+      # please keep in mind that the order plays a role here
+      # oauth-signin -> send javascript redirect page on every 401 to start authentication process
+      # oauth-verify -> check authentication with oauth2_proxy
+      # jwt-validate -> check content of jwt token and crate X-Roles header
+      traefik.http.routers.whoami.middlewares: oauth-signin,oauth-verify,jwt-validate
+    depends_on:
+      - oauth
+      - traefik-forward-auth-jwt-validation
+
+
+
+

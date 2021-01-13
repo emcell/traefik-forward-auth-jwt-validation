@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Redirect to Auth</title>
+</head>
+<body>
+  <a href="{{{redirectTo}}}" id="login">Login</a>
+</body>
+<script>
+  var obj = document.getElementById('login');
+  if(obj){
+    var href = obj.href;
+    obj.href = href.replace('${redirectTo}', encodeURIComponent(window.location.href));
+    obj.click();
+  }
+</script>
+</html>
